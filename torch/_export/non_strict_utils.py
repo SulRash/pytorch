@@ -40,11 +40,9 @@ from torch.export.graph_signature import CustomObjArgument
 from torch.fx.experimental import _config as config
 from torch.fx.experimental.symbolic_shapes import (
     _find_user_code_frame,
-    _suggest_fixes_for_data_dependent_error_non_strict,
     ConstraintViolationError,
     DimDynamic,
     EqualityConstraint,
-    GuardOnDataDependentSymNode,
     RelaxedUnspecConstraint,
     ShapeEnv,
     StatelessSymbolicContext,
@@ -965,8 +963,8 @@ class _NonStrictTorchFunctionHandler(torch.overrides.TorchFunctionMode):
                 )
 
         func, args, kwargs = self._override(func, args, kwargs)
-        try:
-            return func(*args, **kwargs)
-        except GuardOnDataDependentSymNode as e:
-            _suggest_fixes_for_data_dependent_error_non_strict(e)
-            raise
+        # try:
+        return func(*args, **kwargs)
+        # except GuardOnDataDependentSymNode as e:
+        #     _suggest_fixes_for_data_dependent_error_non_strict(e)
+        #     raise
