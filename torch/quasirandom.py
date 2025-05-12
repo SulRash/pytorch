@@ -34,43 +34,54 @@ class SobolEngine:
                               of the random number generator is set to this,
                               if specified. Otherwise, it uses a random seed.
                               Default: ``None``
-
-    Examples::
-
-        >>> # xdoctest: +SKIP("unseeded random state")
-        >>> soboleng = torch.quasirandom.SobolEngine(dimension=5)
-        >>> soboleng.draw(3)
-        tensor([[0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
-                [0.5000, 0.5000, 0.5000, 0.5000, 0.5000],
-                [0.7500, 0.2500, 0.2500, 0.2500, 0.7500]])
+        device (torch.device or str, optional): The device on which all
+                              tensors and internal state are allocated
+                              (e.g., "cuda:0"). Defaults to CPU.
     """
 
     MAXBIT = 30
     MAXDIM = 21201
 
-    def __init__(self, dimension, scramble=False, seed=None):
+    def __init__(
+        self,
+        dimension: int,
+        scramble: bool = False,
+        seed: Optional[int] = None,
+        device: Optional[torch.device] = None,
+    ):
         if dimension > self.MAXDIM or dimension < 1:
             raise ValueError(
                 "Supported range of dimensionality "
                 f"for SobolEngine is [1, {self.MAXDIM}]"
             )
 
+        # Device handling
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"SobolEngine requested on CUDA device {self.device}, "
+                "but CUDA is not available in this PyTorch build."
+            )
+
         self.seed = seed
         self.scramble = scramble
         self.dimension = dimension
 
-        cpu = torch.device("cpu")
+        dev = self.device
 
+        # Initialize Sobol state on the target device
         self.sobolstate = torch.zeros(
-            dimension, self.MAXBIT, device=cpu, dtype=torch.long
+            dimension, self.MAXBIT, device=dev, dtype=torch.long
         )
         torch._sobol_engine_initialize_state_(self.sobolstate, self.dimension)
 
+        # Initial shift vector (zero or scrambled)
         if not self.scramble:
-            self.shift = torch.zeros(self.dimension, device=cpu, dtype=torch.long)
+            self.shift = torch.zeros(dimension, device=dev, dtype=torch.long)
         else:
             self._scramble()
 
+        # Copy into quasi state
         self.quasi = self.shift.clone(memory_format=torch.contiguous_format)
         self._first_point = (self.quasi / 2**self.MAXBIT).reshape(1, -1)
         self.num_generated = 0
@@ -89,7 +100,7 @@ class SobolEngine:
         Args:
             n (Int, optional): The length of sequence of points to draw.
                                Default: 1
-            out (Tensor, optional): The output tensor
+            out (Tensor, optional): The output tensor (must be on same device).
             dtype (:class:`torch.dtype`, optional): the desired data type of the
                                                     returned tensor.
                                                     Default: ``None``
@@ -97,6 +108,7 @@ class SobolEngine:
         if dtype is None:
             dtype = torch.get_default_dtype()
 
+        # Produce result via C++/CUDA-dispatched kernel
         if self.num_generated == 0:
             if n == 1:
                 result = self._first_point.to(dtype)
@@ -123,6 +135,11 @@ class SobolEngine:
         self.num_generated += n
 
         if out is not None:
+            if out.device != self.device:
+                raise ValueError(
+                    f"Output tensor must be on device {self.device}, "
+                    f"but is on {out.device}"
+                )
             out.resize_as_(result).copy_(result)
             return out
 
@@ -166,7 +183,7 @@ class SobolEngine:
         self.num_generated = 0
         return self
 
-    def fast_forward(self, n):
+    def fast_forward(self, n: int):
         r"""
         Function to fast-forward the state of the ``SobolEngine`` by
         :attr:`n` steps. This is equivalent to drawing :attr:`n` samples
@@ -187,31 +204,37 @@ class SobolEngine:
         return self
 
     def _scramble(self):
+        r"""
+        Internal helper to generate a random shift and
+        lower-triangular scramble matrices.
+        """
+        # Set up generator on correct device
         g: Optional[torch.Generator] = None
         if self.seed is not None:
-            g = torch.Generator()
+            g = torch.Generator(device=self.device)
             g.manual_seed(self.seed)
 
-        cpu = torch.device("cpu")
+        dev = self.device
 
         # Generate shift vector
         shift_ints = torch.randint(
-            2, (self.dimension, self.MAXBIT), device=cpu, generator=g
+            2, (self.dimension, self.MAXBIT), device=dev, generator=g
         )
         self.shift = torch.mv(
-            shift_ints, torch.pow(2, torch.arange(0, self.MAXBIT, device=cpu))
+            shift_ints, torch.pow(torch.arange(0, self.MAXBIT, device=dev), 2)
         )
 
         # Generate lower triangular matrices (stacked across dimensions)
         ltm_dims = (self.dimension, self.MAXBIT, self.MAXBIT)
-        ltm = torch.randint(2, ltm_dims, device=cpu, generator=g).tril()
+        ltm = torch.randint(2, ltm_dims, device=dev, generator=g).tril()
 
         torch._sobol_engine_scramble_(self.sobolstate, ltm, self.dimension)
 
     def __repr__(self):
-        fmt_string = [f"dimension={self.dimension}"]
+        fmt = [f"dimension={self.dimension}"]
         if self.scramble:
-            fmt_string += ["scramble=True"]
+            fmt.append("scramble=True")
         if self.seed is not None:
-            fmt_string += [f"seed={self.seed}"]
-        return self.__class__.__name__ + "(" + ", ".join(fmt_string) + ")"
+            fmt.append(f"seed={self.seed}")
+        fmt.append(f"device={self.device}")
+        return f"{self.__class__.__name__}(" + ", ".join(fmt) + ")"
